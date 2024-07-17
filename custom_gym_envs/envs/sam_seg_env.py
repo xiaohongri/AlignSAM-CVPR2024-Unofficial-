@@ -4,17 +4,18 @@ import re
 import cv2
 import gymnasium as gym
 from gymnasium import spaces
-from envs.utils.repvit_sam_wrapper import RepVITSamWrapper
+from custom_gym_envs.envs.utils.repvit_sam_wrapper import RepVITSamWrapper
 
 
 class SamSegEnv(gym.Env):
 
-    def __init__(self, img_shape, embedding_shape, mask_shape, 
+    def __init__(self, img_shape, embedding_shape, mask_shape, render_frame_shape,
                  tgt_class_idx, max_steps, img_dir, gt_mask_dir, 
                  sam_ckpt_fp, img_patch_size=64):
         self.img_shape = img_shape  # The size of the image 
         self.embedding_shape = embedding_shape  # The size of the SAM image encoder output
         self.mask_shape = mask_shape  # The size of the mask
+        self.render_frame_shape = render_frame_shape  # The size of the frame to render
 
         self.tgt_class_idx = tgt_class_idx  # The target class index to use from ground truth mask
         self.max_steps = max_steps  # The maximum number of steps the agent can take
@@ -162,9 +163,10 @@ class SamSegEnv(gym.Env):
         assert resized_gt_mask.shape == pred_mask.shape
 
         intersection = np.sum(resized_gt_mask * pred_mask)
-        union = np.sum(resized_gt_mask) + np.sum(pred_mask) - intersection
+        union = np.sum(resized_gt_mask) + np.sum(pred_mask) #- intersection
 
-        dice_score = 2 * intersection / union
+        eps = 1e-6
+        dice_score = (2 * intersection + eps)/ (union + eps)
         reward = dice_score - self._last_score
         self._last_score = dice_score
         return reward
@@ -230,31 +232,46 @@ class SamSegEnv(gym.Env):
         info = self._get_info()
 
         return observation, info
+    
+
+    def render(self):
+        img = cv2.resize(cv2.cvtColor(self._image, cv2.COLOR_BGR2RGB), self.render_frame_shape[::-1])
+        mask = cv2.cvtColor((self._sam_pred_mask * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
+        for point,label in zip(self._last_actions["input_points"], self._last_actions["input_labels"]):
+            cv2.circle(mask, point, 10, (0, 255, 0) if label == 1 else (0, 0, 255), -1)
+        mask = cv2.resize(mask, self.render_frame_shape[::-1])
+        
+        concat_img = np.concatenate([img, mask], axis=1)
+
+        return concat_img
 
 
 if __name__ == "__main__":
     img_shape = (640, 852, 3) # HxWxC
     embedding_shape = (256, 64, 64) # CxHxW
     mask_shape = (256, 256) # HxW
+    render_frame_shape = (320, 426) # HxW
     tgt_class_idx = 3  
     max_steps = 10
+    img_patch_size = 64
 
-    img_dir = '/media/Data/sam_align_data/images/train'
-    gt_mask_dir = '/media/Data/sam_align_data/annotations/train'
-    sam_ckpt_fp = '/media/Projects/RepViT/sam/weights/repvit_sam.pt'
+    img_dir = '/media/shantanu/Data/sam_align_data/images/train'
+    gt_mask_dir = '/media/shantanu/Data/sam_align_data/annotations/train'
+    sam_ckpt_fp = '/home/shantanu/Projects/RepViT/sam/weights/repvit_sam.pt'
 
-    view_width = 426
-    view_height = 320
 
     env = SamSegEnv(img_shape=img_shape, 
                     embedding_shape=embedding_shape,
                     mask_shape=mask_shape,
+                    render_frame_shape=render_frame_shape,
                     tgt_class_idx=tgt_class_idx,
                     max_steps=max_steps,
                     img_dir=img_dir,
                     gt_mask_dir=gt_mask_dir,
-                    sam_ckpt_fp=sam_ckpt_fp)
+                    sam_ckpt_fp=sam_ckpt_fp,
+                    img_patch_size=img_patch_size)
 
+    print(env.action_space.n)
     obs, info = env.reset()
     
     global sample_action
@@ -268,10 +285,10 @@ if __name__ == "__main__":
             tgt_label = 0
         else:
             return
-        x = x % view_width
-        y = y % view_height
-        scaled_x = int(x * img_shape[1] / view_width)
-        scaled_y = int(y * img_shape[0] / view_height)
+        x = x % render_frame_shape[1]
+        y = y % render_frame_shape[0]
+        scaled_x = int(x * img_shape[1] / render_frame_shape[1])
+        scaled_y = int(y * img_shape[0] / render_frame_shape[0])
         input_dist = np.array([np.linalg.norm([scaled_x-point[0], scaled_y-point[1]]) + (1e6*(label != tgt_label))\
                                 for (point, label) in env._action_to_input.values() if type(point) == tuple])
         sample_action = np.argmin(input_dist)
@@ -282,7 +299,7 @@ if __name__ == "__main__":
         # sample_action = (row_num * num_patches_width + col_num) + offset
         # print(scaled_x, scaled_y, tgt_label, sample_action, env._action_to_input[sample_action])
 
-    cv2.namedWindow('image')
+    cv2.namedWindow('image', cv2.WINDOW_GUI_NORMAL)
     cv2.setMouseCallback('image', get_action)
     while True:
         obs, reward, done, _, info = env.step(sample_action)
@@ -291,14 +308,8 @@ if __name__ == "__main__":
         # print(obs['image'].shape, info['sam_pred_mask'].shape)
         print(info['last_input_labels'], info['last_input_points'])
 
-        img = cv2.resize(cv2.cvtColor(obs['image'], cv2.COLOR_BGR2RGB), (view_width, view_height))
-        mask = cv2.cvtColor((info['sam_pred_mask'] * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
-        for point,label in zip(info['last_input_points'], info['last_input_labels']):
-            cv2.circle(mask, point, 10, (0, 255, 0) if label == 1 else (0, 0, 255), -1)
-        mask = cv2.resize(mask, (view_width, view_height))
-        
-        concat_img = np.concatenate([img, mask], axis=1)
-        cv2.imshow('image', concat_img)
+        frame = env.render()
+        cv2.imshow('image', frame)
 
         sample_action = env.action_space.n - 1  # Mark task as done by default
 
