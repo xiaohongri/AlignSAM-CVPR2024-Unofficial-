@@ -13,3 +13,8 @@ mlflow==2.14.3
 gymnasium==0.29.1
 opencv-python-headless==4.10.0.84
 moviepy==1.0.3
+tyro==0.5.10
+tensorboard==2.11.2
+tensorboard-data-server==0.6.1
+tensorboard-plugin-wit==1.8.1
+timm==0.5.4
