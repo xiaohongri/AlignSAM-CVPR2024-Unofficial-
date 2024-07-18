@@ -17,7 +17,7 @@ import mlflow
 import yaml
 from functools import partial
 
-import custom_gym_envs
+import custom_gym_implns
 
 
 @dataclass

@@ -4,21 +4,21 @@ import re
 import cv2
 import gymnasium as gym
 from gymnasium import spaces
-from custom_gym_envs.envs.utils.repvit_sam_wrapper import RepVITSamWrapper
+from custom_gym_implns.envs.utils.repvit_sam_wrapper import RepVITSamWrapper
 
 
 class SamSegEnv(gym.Env):
     metadata = {"render_modes": ["rgb_array", "human"], "render_fps": 1}
 
     def __init__(self, img_shape, embedding_shape, mask_shape, render_frame_shape,
-                 tgt_class_idx, max_steps, img_dir, gt_mask_dir, 
+                 tgt_class_indices, max_steps, img_dir, gt_mask_dir, 
                  sam_ckpt_fp, img_patch_size=64, render_mode='rgb_array'):
         self.img_shape = img_shape  # The size of the image 
         self.embedding_shape = embedding_shape  # The size of the SAM image encoder output
         self.mask_shape = mask_shape  # The size of the mask
         self.render_frame_shape = render_frame_shape  # The size of the frame to render
 
-        self.tgt_class_idx = tgt_class_idx  # The target class index to use from ground truth mask
+        self.tgt_class_indices = tgt_class_indices  # The target class index to use from ground truth mask
         self.max_steps = max_steps  # The maximum number of steps the agent can take
 
         self.img_dir = img_dir
@@ -134,7 +134,7 @@ class SamSegEnv(gym.Env):
         mask = cv2.resize(cv2.imread(gt_mask_fp, cv2.IMREAD_GRAYSCALE), 
                           self.img_shape[:2][::-1], interpolation=cv2.INTER_NEAREST)
         mask = ( mask/ 50).astype(np.uint8)
-        self._gt_mask = (mask == self.tgt_class_idx).astype(np.float32)
+        self._gt_mask = np.isin(mask, self.tgt_class_indices).astype(np.float32)
 
 
     def _get_obs(self):
@@ -185,17 +185,24 @@ class SamSegEnv(gym.Env):
 
         eps = 1e-6
         dice_score = (2 * intersection + eps)/ (union + eps)
-        reward = dice_score - self._last_score
+        dice_reward = dice_score - self._last_score
         self._last_score = dice_score
 
+        correct_input_reward = 0
         if act == 'add':
             input_point, input_label = self._last_actions["input_points"][-1], \
                 self._last_actions["input_labels"][-1]
             point_image_indices = tuple(map(int, (input_point[1], input_point[0])))
             # print(point_image_indices, input_label)
             gt_label = self._gt_mask[point_image_indices]
-            reward += int(input_label == gt_label)
+            correct_input_reward += int(input_label == gt_label)
 
+            # Check if too many negative inputs are given
+            num_input_label = np.sum(np.array(self._last_actions["input_labels"]) == input_label)
+            if num_input_label > int(self.max_steps * 0.5):
+                correct_input_reward = 0  # Penalize for too many same input types (even if the last input was correct)
+
+        reward = dice_reward + correct_input_reward
         return reward
 
 
@@ -233,7 +240,6 @@ class SamSegEnv(gym.Env):
         self._num_steps += 1
 
         reward = self.compute_reward(self._sam_pred_mask, act)
-        trunc = (self.max_steps is not None and self._num_steps >= self.max_steps)
 
         observation = self._get_obs()
         info = self._get_info()
@@ -285,8 +291,8 @@ if __name__ == "__main__":
     embedding_shape = (256, 64, 64) # CxHxW
     mask_shape = (256, 256) # HxW
     render_frame_shape = (320, 426) # HxW
-    tgt_class_idx = 3  
-    max_steps = 10
+    tgt_class_indices = [3]  
+    max_steps = 5
     img_patch_size = 64
     render_mode = 'human'
 
@@ -299,7 +305,7 @@ if __name__ == "__main__":
                     embedding_shape=embedding_shape,
                     mask_shape=mask_shape,
                     render_frame_shape=render_frame_shape,
-                    tgt_class_idx=tgt_class_idx,
+                    tgt_class_indices=tgt_class_indices,
                     max_steps=max_steps,
                     img_dir=img_dir,
                     gt_mask_dir=gt_mask_dir,
@@ -327,29 +333,31 @@ if __name__ == "__main__":
         scaled_y = int(y * img_shape[0] / render_frame_shape[0])
         sample_action = env.convert_raw_input_to_action((scaled_x, scaled_y), tgt_label)
 
-        # col_num = scaled_x // env.img_patch_size
-        # row_num = scaled_y // env.img_patch_size
-        # num_patches_width = (img_shape[1] // env.img_patch_size) + int(img_shape[1] % env.img_patch_size != 0)
-        # sample_action = (row_num * num_patches_width + col_num) + offset
-        # print(scaled_x, scaled_y, tgt_label, sample_action, env._action_to_input[sample_action])
 
     cv2.namedWindow('image', cv2.WINDOW_GUI_NORMAL)
     cv2.setMouseCallback('image', get_action)
+    total_reward = 0
     while True:
-        obs, reward, done, _, info = env.step(sample_action)
+        obs, reward, done, trunc, info = env.step(sample_action)
         print(reward)
+        total_reward += reward
 
         # print(obs['image'].shape, info['sam_pred_mask'].shape)
         print(info['last_input_labels'], info['last_input_points'])
+
+        if done or trunc:
+            print("Task done, Total reward:", total_reward)
+            print("-"*50)
+            total_reward = 0
+            obs, info = env.reset()
 
         frame = env.render()
         cv2.imshow('image', frame)
 
         sample_action = env.action_space.n - 1  # Mark task as done by default
 
-        if cv2.waitKey(0) == 27 or done:  # Esc key to stop the loop or task is done
+        if cv2.waitKey(0) == 27:  # Esc key to stop the loop
             break
-
 
 
     cv2.destroyAllWindows()
