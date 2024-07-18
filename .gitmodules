@@ -1,0 +1,3 @@
+[submodule "RepViT"]
+	path = RepViT
+	url = https://github.com/THU-MIG/RepViT.git

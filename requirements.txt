@@ -1,12 +1,15 @@
+--find-links https://download.pytorch.org/whl/torch_stable.html
 cprint==1.2.2
 yacs==0.1.8
 pyfakefs==5.6.0
 Pillow-SIMD==9.0.0.post1
+numpy==1.26.4
 pytorch-lightning==2.2.5
 torch==1.13.1+cu117
 torchaudio==0.13.1+cu117
 torchmetrics==1.4.0.post0
 torchvision==0.14.1+cu117
 mlflow==2.14.3
-gymnasium==0.28.1
-opencv-python==4.10.0.84
+gymnasium==0.29.1
+opencv-python-headless==4.10.0.84
+moviepy==1.0.3
