@@ -8,10 +8,11 @@ from custom_gym_envs.envs.utils.repvit_sam_wrapper import RepVITSamWrapper
 
 
 class SamSegEnv(gym.Env):
+    metadata = {"render_modes": ["rgb_array", "human"], "render_fps": 1}
 
     def __init__(self, img_shape, embedding_shape, mask_shape, render_frame_shape,
                  tgt_class_idx, max_steps, img_dir, gt_mask_dir, 
-                 sam_ckpt_fp, img_patch_size=64):
+                 sam_ckpt_fp, img_patch_size=64, render_mode='rgb_array'):
         self.img_shape = img_shape  # The size of the image 
         self.embedding_shape = embedding_shape  # The size of the SAM image encoder output
         self.mask_shape = mask_shape  # The size of the mask
@@ -34,6 +35,9 @@ class SamSegEnv(gym.Env):
         self._last_actions = {'input_points':[], 'input_labels':[]}
         self._last_score = 0
 
+        assert render_mode in self.metadata["render_modes"], "Invalid render mode"
+        self.render_mode = render_mode
+
         self.sam_predictor = RepVITSamWrapper(sam_ckpt_fp)
 
         self.pattern = re.compile(r'uid([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})')
@@ -42,9 +46,9 @@ class SamSegEnv(gym.Env):
         # Each location is encoded as an element of {0, ..., `size`}^2, i.e. MultiDiscrete([size, size]).
         self.observation_space = spaces.Dict(
             {
-                "image": spaces.Box(0, 255, shape=(*img_shape,), dtype=int),
-                "sam_image_embeddings": spaces.Box(-np.inf, np.inf, shape=(*embedding_shape,), dtype=float),
-                "sam_pred_mask_prob": spaces.Box(0, 1, shape=(*mask_shape,), dtype=float),
+                "image": spaces.Box(0, 255, shape=(*img_shape,), dtype=np.uint8),
+                "sam_image_embeddings": spaces.Box(-np.inf, np.inf, shape=(*embedding_shape,), dtype=np.float32),
+                "sam_pred_mask_prob": spaces.Box(0, 1, shape=(*mask_shape,), dtype=np.float32),
             }
         )
 
@@ -102,25 +106,23 @@ class SamSegEnv(gym.Env):
         for extn in image_extns:
             self.img_fps += glob.glob(self.img_dir + "/*" + extn)
 
+        if len(self.img_fps) == 0:
+            raise ValueError(f"No images found in {self.img_dir}")
+
         self.img_fps.sort()
 
         mask_uid_to_fp = {}
         for mask_fp in glob.glob(self.gt_mask_dir + "/*" + mask_extn):
             mask_uid_to_fp[self.extract_uuid(mask_fp)] = mask_fp
 
+        if len(mask_uid_to_fp) == 0:
+            raise ValueError(f"No masks found in {self.gt_mask_dir}")
+
         self.mask_fps = [mask_uid_to_fp[self.extract_uuid(img_fp)] for img_fp in self.img_fps]
 
         chosen_idx = self.np_random.integers(0, len(self.img_fps))
         self._load_image_and_mask(self.img_fps[chosen_idx], self.mask_fps[chosen_idx])
 
-
-    def _get_obs(self):
-        return {
-            "image": self._image, 
-            "sam_image_embeddings": self._sam_image_embeddings,
-            "sam_pred_mask_prob": self._sam_pred_mask_prob,
-        }
-    
 
     def _load_image_and_mask(self, img_fp, gt_mask_fp):
         self._image = cv2.resize(cv2.cvtColor(cv2.imread(img_fp, -1), cv2.COLOR_BGR2RGB), self.img_shape[:2][::-1])
@@ -134,6 +136,14 @@ class SamSegEnv(gym.Env):
         mask = ( mask/ 50).astype(np.uint8)
         self._gt_mask = (mask == self.tgt_class_idx).astype(np.float32)
 
+
+    def _get_obs(self):
+        return {
+            "image": self._image, 
+            "sam_image_embeddings": self._sam_image_embeddings,
+            "sam_pred_mask_prob": self._sam_pred_mask_prob,
+        }
+    
 
     def _get_info(self):
         return {
@@ -251,7 +261,7 @@ class SamSegEnv(gym.Env):
     
 
     def render(self):
-        img = cv2.resize(cv2.cvtColor(self._image, cv2.COLOR_BGR2RGB), self.render_frame_shape[::-1])
+        img = cv2.resize(cv2.cvtColor(self._image, cv2.COLOR_RGB2BGR), self.render_frame_shape[::-1])
 
         gt_mask = cv2.resize((self._gt_mask * 255).astype(np.uint8), self.render_frame_shape[::-1])
         gt_mask = cv2.cvtColor(gt_mask, cv2.COLOR_GRAY2BGR)
@@ -264,6 +274,9 @@ class SamSegEnv(gym.Env):
         
         concat_img = np.concatenate([img, gt_mask, mask], axis=1)
 
+        if self.render_mode == 'rgb_array':
+            return cv2.cvtColor(concat_img, cv2.COLOR_BGR2RGB)
+
         return concat_img
 
 
@@ -275,6 +288,7 @@ if __name__ == "__main__":
     tgt_class_idx = 3  
     max_steps = 10
     img_patch_size = 64
+    render_mode = 'human'
 
     img_dir = '/media/shantanu/Data/sam_align_data/images/train'
     gt_mask_dir = '/media/shantanu/Data/sam_align_data/annotations/train'
@@ -290,7 +304,8 @@ if __name__ == "__main__":
                     img_dir=img_dir,
                     gt_mask_dir=gt_mask_dir,
                     sam_ckpt_fp=sam_ckpt_fp,
-                    img_patch_size=img_patch_size)
+                    img_patch_size=img_patch_size,
+                    render_mode=render_mode)
 
     print(env.action_space.n)
     obs, info = env.reset()

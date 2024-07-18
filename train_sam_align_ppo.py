@@ -15,6 +15,7 @@ from torch.utils.tensorboard import SummaryWriter
 
 import mlflow
 import yaml
+from functools import partial
 
 import custom_gym_envs
 
@@ -33,10 +34,14 @@ class Args:
     """the MLFlow's project name"""
     mlflow_user: str = None
     """the username (team) of MLFlow's project"""
-    log_dir: str = "runs"
+    log_dir: str = "logs"
     """the logging directory for the experiment"""
-    capture_video: bool = False
-    """whether to capture videos of the agent performances (check out `{log_dir}/{run_id}/videos` folder)"""
+    checkpoint_iter_freq: int = 50
+    """the frequency of making checkpoint (if applicable)"""
+    capture_video: bool = True
+    """whether to capture videos of the agent performances (check out `{log_dir}/{run_name}/videos` folder)"""
+    capture_ep_freq: int = 100
+    """the frequency of capturing videos of the agent performances"""
 
     # Algorithm specific arguments
     env_id: str = "SamSegEnv-v0"
@@ -85,12 +90,16 @@ class Args:
     """the number of iterations (computed in runtime)"""
 
 
-def make_env(env_id, idx, capture_video, log_dir, env_cfg):
+def make_env(env_id, idx, capture_video, capture_ep_freq, log_dir, env_cfg):
+    def capture_ep(capture_ep_freq, episode_idx):
+        return episode_idx % capture_ep_freq == 0
+    
     def thunk():
         if capture_video and idx == 0:
             env = gym.make(env_id, **env_cfg)
             video_folder = os.path.join(log_dir, "videos")
-            env = gym.wrappers.RecordVideo(env, video_folder)
+            env = gym.wrappers.RecordVideo(env, video_folder, 
+                                           episode_trigger=partial(capture_ep, capture_ep_freq))
         else:
             env = gym.make(env_id, **env_cfg)
         env = gym.wrappers.RecordEpisodeStatistics(env)
@@ -196,8 +205,13 @@ if __name__ == "__main__":
     
     env_cfg = yaml.safe_load(open(args.env_cfg_path, "r"))
 
-    if not os.path.exists(args.log_dir):
-        os.makedirs(args.log_dir)
+    log_dir = os.path.join(args.log_dir.rstrip("/"), run_name)
+    if not os.path.exists(log_dir):
+        os.makedirs(log_dir)
+    
+    checkpoint_dir = os.path.join(log_dir, "checkpoints")
+    if not os.path.exists(checkpoint_dir):
+        os.makedirs(checkpoint_dir)
     
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
@@ -207,7 +221,6 @@ if __name__ == "__main__":
     }
 
     with mlflow.start_run(run_name=run_name, tags=mlflow_run_tags, description="parent") as parent_run:
-        log_dir = os.path.join(args.log_dir.rstrip("/"), run_name)
         writer = SummaryWriter(log_dir)
         writer.add_text(
             "hyperparameters",
@@ -219,7 +232,8 @@ if __name__ == "__main__":
 
         # env setup
         envs = gym.vector.SyncVectorEnv(
-            [make_env(args.env_id, i, args.capture_video, log_dir, env_cfg) for i in range(args.num_envs)],
+            [make_env(args.env_id, i, args.capture_video, args.capture_ep_freq, log_dir, env_cfg) \
+             for i in range(args.num_envs)],
         )
         assert isinstance(envs.single_action_space, gym.spaces.Discrete), "only discrete action space is supported"
 
@@ -379,7 +393,19 @@ if __name__ == "__main__":
             writer.add_scalar("losses/clipfrac", np.mean(clipfracs), global_step)
             writer.add_scalar("losses/explained_variance", explained_var, global_step)
             print("SPS:", int(global_step / (time.time() - start_time)))
+            print("Iteration:", iteration)
             writer.add_scalar("charts/SPS", int(global_step / (time.time() - start_time)), global_step)
+
+            if iteration % args.checkpoint_iter_freq == 0:
+                checkpoint = {
+                    "model": agent.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                }
+                torch.save(checkpoint, os.path.join(checkpoint_dir, f"checkpoint_{iteration}.pth"))
+                latest_symbolic = os.path.join(checkpoint_dir, "latest.pth")
+                if os.path.islink(latest_symbolic):
+                    os.unlink(latest_symbolic)
+                os.symlink(f"checkpoint_{iteration}.pth", latest_symbolic)
 
         envs.close()
         writer.close()

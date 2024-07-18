@@ -5,6 +5,7 @@ render_frame_shape: [320, 426] # HxW
 tgt_class_idx: 3  # Rug index
 max_steps: 5
 img_patch_size: 64
+render_mode: 'rgb_array'
 
 img_dir: '/media/shantanu/Data/sam_align_data/images/train'
 gt_mask_dir: '/media/shantanu/Data/sam_align_data/annotations/train'
