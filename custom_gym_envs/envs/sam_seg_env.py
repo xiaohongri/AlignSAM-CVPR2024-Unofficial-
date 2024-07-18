@@ -65,7 +65,7 @@ class SamSegEnv(gym.Env):
         """
         self._action_to_input = {
         }
-        for i in range(0, num_patches*2, 2):
+        for i in range(0, num_patches, 2):
             row_idx = i // num_width_patches
             col_idx = i % num_width_patches
             # Mark patch center as input point (x, y)
@@ -78,9 +78,9 @@ class SamSegEnv(gym.Env):
             self._action_to_input[i + 1] = (input_point, 0)
 
         # The 2nd last action is to remove previous input
-        self._action_to_input[num_patches*2] = ('remove', -1)
+        self._action_to_input[num_patches] = ('remove', -1)
         # The last action is to mark the task as done
-        self._action_to_input[num_patches*2 + 1] = ('done', -1)
+        self._action_to_input[num_patches + 1] = ('done', -1)
         self.action_space = spaces.Discrete(len(self._action_to_input))
 
         self._load_image_and_mask_fps()
@@ -155,7 +155,15 @@ class SamSegEnv(gym.Env):
         self._sam_pred_mask = (1 / (1 + np.exp(-masks[best_mask_idx]))).astype(np.float32)
 
 
-    def compute_reward(self, pred_mask):
+    def convert_raw_input_to_action(self, input_point, input_label):
+        input_dist = np.array([np.linalg.norm([input_point[0]-point[0], input_point[1]-point[1]]) + \
+                               (1e6*(label != input_label)) for (point, label) in env._action_to_input.values() \
+                                if type(point) == tuple])
+        sample_action = np.argmin(input_dist)
+        return sample_action
+
+
+    def compute_reward(self, pred_mask, act):
         # Compute dice score
         resized_gt_mask = cv2.resize(self._gt_mask,
                                      pred_mask.shape[::-1],
@@ -169,6 +177,15 @@ class SamSegEnv(gym.Env):
         dice_score = (2 * intersection + eps)/ (union + eps)
         reward = dice_score - self._last_score
         self._last_score = dice_score
+
+        if act == 'add':
+            input_point, input_label = self._last_actions["input_points"][-1], \
+                self._last_actions["input_labels"][-1]
+            point_image_indices = tuple(map(int, (input_point[1], input_point[0])))
+            # print(point_image_indices, input_label)
+            gt_label = self._gt_mask[point_image_indices]
+            reward += int(input_label == gt_label)
+
         return reward
 
 
@@ -176,28 +193,25 @@ class SamSegEnv(gym.Env):
         if action < 0 or action >= self.action_space.n:
             raise ValueError(f"Invalid action: {action}")
         
-        if self.max_steps is not None and self._num_steps >= self.max_steps:
-            raise ValueError("Maximum number of steps reached")
+        terminated = self._action_to_input[action][0] == 'done'
+        trunc = (self.max_steps is not None and self._num_steps >= self.max_steps)
+        if terminated or trunc:
+            return self._get_obs(), 0, terminated, trunc, self._get_info()
         
-        
-        if self._action_to_input[action][0] == 'done':
-            # Task is done
-            terminated = True
-            reward = 0
-            observation = self._get_obs()
-            info = self._get_info()
-            return observation, reward, terminated, False, info
-        
+    
+        act = None
         if self._action_to_input[action][0] == 'remove':
             # Remove the last input
             if len(self._last_actions["input_points"]) > 0:
                 self._last_actions["input_points"].pop()
                 self._last_actions["input_labels"].pop()
+                act = 'remove'
         else:
             input_point, input_label = self._action_to_input[action]
             
             self._last_actions["input_points"].append(input_point)
             self._last_actions["input_labels"].append(input_label)
+            act = 'add'
 
         if len(self._last_actions["input_points"]) > 0:
             self.run_sam()
@@ -208,13 +222,13 @@ class SamSegEnv(gym.Env):
         
         self._num_steps += 1
 
-        reward = self.compute_reward(self._sam_pred_mask)
-        terminated = self._num_steps >= self.max_steps
+        reward = self.compute_reward(self._sam_pred_mask, act)
+        trunc = (self.max_steps is not None and self._num_steps >= self.max_steps)
 
         observation = self._get_obs()
         info = self._get_info()
 
-        return observation, reward, terminated, False, info
+        return observation, reward, False, trunc, info
     
 
     def reset(self, seed=None, options=None):
@@ -224,8 +238,10 @@ class SamSegEnv(gym.Env):
         chosen_idx = self.np_random.integers(0, len(self.img_fps))
         img_fp = self.img_fps[chosen_idx]
         gt_mask_fp = self.mask_fps[chosen_idx]
-
         self._load_image_and_mask(img_fp, gt_mask_fp)
+
+        self._last_actions = {'input_points':[], 'input_labels':[]}
+        self._num_steps = 0
         self._last_score = 0
 
         observation = self._get_obs()
@@ -236,12 +252,17 @@ class SamSegEnv(gym.Env):
 
     def render(self):
         img = cv2.resize(cv2.cvtColor(self._image, cv2.COLOR_BGR2RGB), self.render_frame_shape[::-1])
+
+        gt_mask = cv2.resize((self._gt_mask * 255).astype(np.uint8), self.render_frame_shape[::-1])
+        gt_mask = cv2.cvtColor(gt_mask, cv2.COLOR_GRAY2BGR)
+
+
         mask = cv2.cvtColor((self._sam_pred_mask * 255).astype(np.uint8), cv2.COLOR_GRAY2BGR)
         for point,label in zip(self._last_actions["input_points"], self._last_actions["input_labels"]):
             cv2.circle(mask, point, 10, (0, 255, 0) if label == 1 else (0, 0, 255), -1)
         mask = cv2.resize(mask, self.render_frame_shape[::-1])
         
-        concat_img = np.concatenate([img, mask], axis=1)
+        concat_img = np.concatenate([img, gt_mask, mask], axis=1)
 
         return concat_img
 
@@ -289,9 +310,7 @@ if __name__ == "__main__":
         y = y % render_frame_shape[0]
         scaled_x = int(x * img_shape[1] / render_frame_shape[1])
         scaled_y = int(y * img_shape[0] / render_frame_shape[0])
-        input_dist = np.array([np.linalg.norm([scaled_x-point[0], scaled_y-point[1]]) + (1e6*(label != tgt_label))\
-                                for (point, label) in env._action_to_input.values() if type(point) == tuple])
-        sample_action = np.argmin(input_dist)
+        sample_action = env.convert_raw_input_to_action((scaled_x, scaled_y), tgt_label)
 
         # col_num = scaled_x // env.img_patch_size
         # row_num = scaled_y // env.img_patch_size

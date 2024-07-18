@@ -3,7 +3,7 @@ embedding_shape: [256, 64, 64] # CxHxW
 mask_shape: [256, 256] # HxW
 render_frame_shape: [320, 426] # HxW
 tgt_class_idx: 3  # Rug index
-max_steps: 10
+max_steps: 5
 img_patch_size: 64
 
 img_dir: '/media/shantanu/Data/sam_align_data/images/train'

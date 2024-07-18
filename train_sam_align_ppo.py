@@ -47,9 +47,9 @@ class Args:
     """total timesteps of the experiments"""
     learning_rate: float = 2.5e-4
     """the learning rate of the optimizer"""
-    num_envs: int = 1
+    num_envs: int = 8
     """the number of parallel game environments"""
-    num_steps: int = 10
+    num_steps: int = 16
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = True
     """Toggle learning rate annealing for policy and value networks"""
@@ -126,7 +126,7 @@ class Agent(nn.Module):
 
     def parse_obs(self, obs):
         sam_image_embeddings = obs["sam_image_embeddings"] # (b, c, h, w)
-        sam_pred_mask_prob = obs["sam_pred_mask_prob"]#.unsqueeze(dim=1)  # (b, 1, h, w)
+        sam_pred_mask_prob = obs["sam_pred_mask_prob"].unsqueeze(dim=1)  # (b, 1, h, w)
 
         embedding_shape = tuple(sam_image_embeddings.size())
         resized_sam_mask_prob = nn.functional.interpolate(
@@ -134,7 +134,8 @@ class Agent(nn.Module):
             mode="bilinear", align_corners=False)
         resized_sam_mask_prob = resized_sam_mask_prob.repeat(1, embedding_shape[1], 1, 1)
 
-        x = sam_image_embeddings * resized_sam_mask_prob
+        x = sam_image_embeddings * resized_sam_mask_prob 
+        x += sam_image_embeddings # skip connection
         return x
 
     def get_value(self, obs):
@@ -311,7 +312,7 @@ if __name__ == "__main__":
                     end = start + args.minibatch_size
                     mb_inds = b_inds[start:end]
 
-                    mb_obs = get_obs_at_inds(obs, mb_inds)
+                    mb_obs = get_obs_at_inds(b_obs, mb_inds)
 
                     _, newlogprob, entropy, newvalue = agent.get_action_and_value(mb_obs, 
                                                                                   b_actions.long()[mb_inds])
@@ -362,6 +363,11 @@ if __name__ == "__main__":
             y_pred, y_true = b_values.cpu().numpy(), b_returns.cpu().numpy()
             var_y = np.var(y_true)
             explained_var = np.nan if var_y == 0 else 1 - np.var(y_true - y_pred) / var_y
+
+            mlflow.log_metric("losses/value_loss", v_loss.item(), global_step)
+            mlflow.log_metric("losses/policy_loss", pg_loss.item(), global_step)
+            mlflow.log_metric("losses/entropy", entropy_loss.item(), global_step)
+
 
             # TRY NOT TO MODIFY: record rewards for plotting purposes
             writer.add_scalar("charts/learning_rate", optimizer.param_groups[0]["lr"], global_step)
