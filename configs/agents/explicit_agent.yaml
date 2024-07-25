@@ -1,0 +1,4 @@
+type: "explicit"
+clip_model_name: "ViT-B/16"
+clip_image_size: [224, 224]
+clip_text_prompt: ["ground"]
