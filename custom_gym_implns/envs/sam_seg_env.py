@@ -12,7 +12,22 @@ class SamSegEnv(gym.Env):
 
     def __init__(self, img_shape, embedding_shape, mask_shape, render_frame_shape,
                  tgt_class_indices, max_steps, img_dir, gt_mask_dir, 
-                 sam_ckpt_fp, img_patch_size=64, render_mode='rgb_array'):
+                 sam_ckpt_fp, img_patch_size=None, num_patches=None, render_mode='rgb_array'):
+        
+        assert len(img_shape) == 3, "Image shape should be (H, W, C)"
+        assert len(embedding_shape) == 3, "Embedding shape should be (C, H, W)"
+        assert len(mask_shape) == 2, "Mask shape should be (H, W)"
+        assert len(render_frame_shape) == 2, "Render frame shape should be (H, W)"
+        assert len(tgt_class_indices) > 0, "Target class indices should be non-empty"
+        assert max_steps is None or max_steps > 0, "Max steps should be None or > 0"
+        
+        assert (img_patch_size is not None and num_patches is None) or \
+            (img_patch_size is None and num_patches is not None), \
+            "Either img_patch_size or num_patches should be provided, not both"
+
+        assert render_mode in self.metadata["render_modes"], "Invalid render mode"
+
+
         self.img_shape = img_shape  # The size of the image 
         self.embedding_shape = embedding_shape  # The size of the SAM image encoder output
         self.mask_shape = mask_shape  # The size of the mask
@@ -34,8 +49,6 @@ class SamSegEnv(gym.Env):
         self._num_steps = 0
         self._last_actions = {'input_points':[], 'input_labels':[]}
         self._last_score = 0
-
-        assert render_mode in self.metadata["render_modes"], "Invalid render mode"
         self.render_mode = render_mode
 
         self.sam_predictor = RepVITSamWrapper(sam_ckpt_fp)
@@ -52,39 +65,41 @@ class SamSegEnv(gym.Env):
             }
         )
 
-        # Number of actions is equal to number of patches in the image*2 + 1
-        # Each patch can be marked as positive or negative input
         img_h, img_w = img_shape[:2]
-        # number of patches along a single dimension is the ceiling of the division of the image size by the patch size
-        num_width_patches = img_w//img_patch_size + int(img_w%img_patch_size != 0)
-        num_height_patches = img_h//img_patch_size + int(img_h%img_patch_size != 0)
-        num_patches = num_width_patches * num_height_patches
+        if img_patch_size is not None:
+            width_patch_size = height_patch_size = img_patch_size
+            # number of patches along a single dimension is the ceiling of the division of the image size by the patch size
+            num_width_patches = img_w//width_patch_size + int(img_w%width_patch_size != 0)
+            num_height_patches = img_h//height_patch_size + int(img_h%height_patch_size != 0)
+        elif num_patches is not None:
+            num_width_patches = num_height_patches = num_patches
+            width_patch_size = img_w / num_width_patches
+            height_patch_size = img_h / num_height_patches
+        else:
+            raise ValueError("Either img_patch_size or num_patches should be provided")
         # print(num_width_patches, num_height_patches)
 
-        """
-        The following dictionary maps abstract actions from `self.action_space` to
-        the input_points and input_labels submitted to SAM in if that action is taken.
-        I.e. 0 corresponds to "(0, 0), positive", 1 to "(0, 0), negative",
-        2 to "(0, 1), positive", 3 to "(0, 1), negative", etc
-        """
-        self._action_to_input = {
-        }
-        for i in range(0, num_patches, 2):
-            row_idx = i // num_width_patches
-            col_idx = i % num_width_patches
-            # Mark patch center as input point (x, y)
-            input_point = (col_idx * img_patch_size + img_patch_size//2, 
-                           row_idx * img_patch_size + img_patch_size//2)
-            
-            # print(i, col_idx, row_idx, input_point)
-            
-            self._action_to_input[i] = (input_point, 1)
-            self._action_to_input[i + 1] = (input_point, 0)
+        
+        # The following dictionary maps abstract actions from `self.action_space` to
+        # the input_points and input_labels submitted to SAM in if that action is taken.
+        # I.e. 0 corresponds to "(0, 0), positive", 1 to "(0, 0), negative",
+        # 2 to "(0, 1), positive", 3 to "(0, 1), negative", etc
+        
+        self._action_to_input = {}
+        for wpatch_idx in range(0, num_width_patches):
+            for hpatch_idx in range(0, num_height_patches):
+                # Mark patch center as input point (x, y)
+                patch_center_x = int(wpatch_idx * width_patch_size + width_patch_size/2)
+                patch_center_y = int(hpatch_idx * height_patch_size + height_patch_size/2)
+                input_point = (patch_center_x, patch_center_y)
+                
+                self._action_to_input[len(self._action_to_input)] = (input_point, 1)
+                self._action_to_input[len(self._action_to_input)] = (input_point, 0)
 
         # The 2nd last action is to remove previous input
-        self._action_to_input[num_patches] = ('remove', -1)
+        # self._action_to_input[num_patches] = ('remove', -1)
         # The last action is to mark the task as done
-        self._action_to_input[num_patches + 1] = ('done', -1)
+        # self._action_to_input[num_patches + 1] = ('done', -1)
         self.action_space = spaces.Discrete(len(self._action_to_input))
 
         self._load_image_and_mask_fps()
@@ -128,7 +143,7 @@ class SamSegEnv(gym.Env):
         self._image = cv2.resize(cv2.cvtColor(cv2.imread(img_fp, -1), cv2.COLOR_BGR2RGB), self.img_shape[:2][::-1])
         self.sam_predictor.set_image(self._image)
         self._sam_image_embeddings = self.sam_predictor.get_image_embeddings()
-        self._sam_pred_mask_prob = np.ones(self.mask_shape, dtype=np.float32)
+        self._sam_pred_mask_prob = np.zeros(self.mask_shape, dtype=np.float32)
         self._sam_pred_mask = np.zeros(self.img_shape[:2], dtype=np.float32)
 
         mask = cv2.resize(cv2.imread(gt_mask_fp, cv2.IMREAD_GRAYSCALE), 
@@ -186,7 +201,7 @@ class SamSegEnv(gym.Env):
         eps = 1e-6
         dice_score = (2 * intersection + eps)/ (union + eps)
         dice_reward = dice_score - self._last_score
-        self._last_score = dice_score
+        self._last_score = max(dice_score, self._last_score)
 
         correct_input_reward = 0
         if act == 'add':
@@ -195,14 +210,24 @@ class SamSegEnv(gym.Env):
             point_image_indices = tuple(map(int, (input_point[1], input_point[0])))
             # print(point_image_indices, input_label)
             gt_label = self._gt_mask[point_image_indices]
-            correct_input_reward += int(input_label == gt_label)
 
-            # Check if too many negative inputs are given
-            num_input_label = np.sum(np.array(self._last_actions["input_labels"]) == input_label)
-            if num_input_label > int(self.max_steps * 0.5):
-                correct_input_reward = 0  # Penalize for too many same input types (even if the last input was correct)
+            if gt_label == 1:
+                # Reward for correct input for positive class
+                correct_input_reward = int(input_label == gt_label)
+            else:
+                # Penalize for wrong input for negative class
+                correct_input_reward = -1 * int(input_label != gt_label)
 
-        reward = dice_reward + correct_input_reward
+            # # Check if too many negative inputs are given
+            # num_input_label = np.sum(np.array(self._last_actions["input_labels"]) == input_label)
+            # if num_input_label > int(self.max_steps * 0.5):
+            #     correct_input_reward = 0  # Penalize for too many same input types (even if the last input was correct)
+
+        # reward = dice_reward + correct_input_reward
+        reward = correct_input_reward
+
+        # Add bonus reward if dice score is above a threshold and not the first action
+        reward += int((dice_reward > 0.05) and len(self._last_actions)> 0)* 2
         return reward
 
 
@@ -234,7 +259,7 @@ class SamSegEnv(gym.Env):
             self.run_sam()
         else:
             # Set the mask and mask_prob to initial state
-            self._sam_pred_mask_prob = np.ones(self.mask_shape, dtype=np.float32)
+            self._sam_pred_mask_prob = np.zeros(self.mask_shape, dtype=np.float32)
             self._sam_pred_mask = np.zeros(self.img_shape[:2], dtype=np.float32)
         
         self._num_steps += 1
@@ -299,7 +324,6 @@ if __name__ == "__main__":
     img_dir = '/media/shantanu/Data/sam_align_data/images/train'
     gt_mask_dir = '/media/shantanu/Data/sam_align_data/annotations/train'
     sam_ckpt_fp = '/home/shantanu/Projects/RepViT/sam/weights/repvit_sam.pt'
-
 
     env = SamSegEnv(img_shape=img_shape, 
                     embedding_shape=embedding_shape,

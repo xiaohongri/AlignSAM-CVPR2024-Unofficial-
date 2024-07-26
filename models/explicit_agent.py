@@ -27,20 +27,26 @@ class ExplicitAgent(nn.Module):
 
         self.sam_network = nn.Sequential(
             layer_init(nn.Conv2d(256, 128, 3, stride=2, padding=1, padding_mode='zeros')), # (b, 256, 64, 64)
+            nn.BatchNorm2d(128),
             nn.ReLU(),
             layer_init(nn.Conv2d(128, 64, 3, stride=2, padding=1, padding_mode='zeros')), # (b, 128, 32, 32)
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             layer_init(nn.Conv2d(64, 64, 5, stride=3)), # (b, 64, 16, 16)
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Flatten(), # (b, 1024)
         )
 
         self.clip_network = nn.Sequential(
-            layer_init(nn.Conv2d(1, 16, 3, stride=2, padding=1, padding_mode='zeros')), # (b, 1, 64, 64)
+            layer_init(nn.Conv2d(len(self.clip_text_prompt), 16, 3, stride=2, padding=1, padding_mode='zeros')), # (b, num_prompts, 64, 64)
+            nn.BatchNorm2d(16),
             nn.ReLU(),  
             layer_init(nn.Conv2d(16, 32, 3, stride=2, padding=1, padding_mode='zeros')), # (b, 16, 32, 32)
+            nn.BatchNorm2d(32),
             nn.ReLU(),
             layer_init(nn.Conv2d(32, 64, 5, stride=3)), # (b, 64, 4, 4)
+            nn.BatchNorm2d(64),
             nn.ReLU(),
             nn.Flatten(), # (b, 1024)
         )
@@ -106,8 +112,7 @@ class ExplicitAgent(nn.Module):
             similarity_map = clip.get_similarity_map(similarity[:, 1:, :], 
                                                     (embedding_shape[2], embedding_shape[3]))
             
-            similarity_map = similarity_map.mean(dim=-1) # Average over all text features 
-            similarity_map = similarity_map.unsqueeze(dim=1) # (b, 1, h, w)
+            similarity_map = similarity_map.permute(0, 3, 1, 2) # (b, h, w, c) -> (b, c, h, w)
 
             return similarity_map
 
