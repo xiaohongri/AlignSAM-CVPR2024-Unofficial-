@@ -37,6 +37,8 @@ class Args:
     """the username (team) of MLFlow's project"""
     log_dir: str = "logs"
     """the logging directory for the experiment"""
+    resume_from: str = None
+    """the path to the checkpoint for resuming the training"""
     checkpoint_iter_freq: int = 50
     """the frequency of making checkpoint (if applicable)"""
     capture_video: bool = True
@@ -167,6 +169,9 @@ if __name__ == "__main__":
     checkpoint_dir = os.path.join(log_dir, "checkpoints")
     if not os.path.exists(checkpoint_dir):
         os.makedirs(checkpoint_dir)
+
+    if (args.resume_from is not None) and (not os.path.exists(args.resume_from)):
+        raise ValueError(f"resume_from {args.resume_from} does not exist")
     
     device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
 
@@ -194,6 +199,12 @@ if __name__ == "__main__":
 
         agent = make_agent(agent_cfg, envs).to(device)
         optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+
+        if args.resume_from is not None:
+            checkpoint = torch.load(args.resume_from)
+            agent.load_state_dict(checkpoint["model"])
+            optimizer = optim.Adam(agent.parameters(), lr=args.learning_rate, eps=1e-5)
+            optimizer.load_state_dict(checkpoint["optimizer"])
 
         # ALGO Logic: Storage setup
         obs = dict()
