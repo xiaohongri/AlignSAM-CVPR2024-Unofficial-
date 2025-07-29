@@ -4,21 +4,26 @@ import re
 import cv2
 import gymnasium as gym
 from gymnasium import spaces
+
+import sys
+import os
+sys.path.append(os.path.abspath(os.getcwd()))
+
 from custom_gym_implns.envs.utils.repvit_sam_wrapper import RepVITSamWrapper
+from datasets import get_dataset
 
 
 class SamSegEnv(gym.Env):
     metadata = {"render_modes": ["rgb_array", "human"], "render_fps": 1}
 
     def __init__(self, img_shape, embedding_shape, mask_shape, render_frame_shape,
-                 tgt_class_indices, max_steps, img_dir, gt_mask_dir, 
-                 sam_ckpt_fp, img_patch_size=None, num_patches=None, render_mode='rgb_array'):
+                 max_steps, target_categories, dataset_config, sam_ckpt_fp, 
+                 img_patch_size=None, num_patches=None, render_mode='rgb_array'):
         
         assert len(img_shape) == 3, "Image shape should be (H, W, C)"
         assert len(embedding_shape) == 3, "Embedding shape should be (C, H, W)"
         assert len(mask_shape) == 2, "Mask shape should be (H, W)"
         assert len(render_frame_shape) == 2, "Render frame shape should be (H, W)"
-        assert len(tgt_class_indices) > 0, "Target class indices should be non-empty"
         assert max_steps is None or max_steps > 0, "Max steps should be None or > 0"
         
         assert (img_patch_size is not None and num_patches is None) or \
@@ -33,15 +38,16 @@ class SamSegEnv(gym.Env):
         self.mask_shape = mask_shape  # The size of the mask
         self.render_frame_shape = render_frame_shape  # The size of the frame to render
 
-        self.tgt_class_indices = tgt_class_indices  # The target class index to use from ground truth mask
         self.max_steps = max_steps  # The maximum number of steps the agent can take
 
-        self.img_dir = img_dir
-        self.gt_mask_dir = gt_mask_dir
+        self.target_categories = target_categories  # The categories to segment
+        self.dataset_config = dataset_config
+        self.dataset = get_dataset(self.dataset_config)
 
         self.img_patch_size = img_patch_size
 
         self._image = None
+        self._curr_target_cat = None
         self._sam_image_embeddings = None
         self._sam_pred_mask_prob = None
         self._sam_pred_mask = None
@@ -52,8 +58,6 @@ class SamSegEnv(gym.Env):
         self.render_mode = render_mode
 
         self.sam_predictor = RepVITSamWrapper(sam_ckpt_fp)
-
-        self.pattern = re.compile(r'uid([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})')
 
         # Observations are dictionaries with the agent's and the target's location.
         # Each location is encoded as an element of {0, ..., `size`}^2, i.e. MultiDiscrete([size, size]).
@@ -102,54 +106,22 @@ class SamSegEnv(gym.Env):
         # self._action_to_input[num_patches + 1] = ('done', -1)
         self.action_space = spaces.Discrete(len(self._action_to_input))
 
-        self._load_image_and_mask_fps()
+        self._load_sample_from_dataset()
 
 
-    def extract_uuid(self, filename):
-        match = self.pattern.search(filename)
-        if match is None:
-            raise Exception(f'No uuid match found. {filename}')
+    def _load_sample_from_dataset(self):
+        # Choose a random sample from the target categories
+        self._curr_target_cat = np.random.choice(self.target_categories)
 
-        uuid_key = match.group()[3:]  # Strip the 'uid' in the beginning.
-        return uuid_key
+        img, mask = self.dataset.get_sample(target_categories=[self._curr_target_cat])
 
-
-    def _load_image_and_mask_fps(self):
-        image_extns = [".jpg", ".jpeg", ".png", ".PNG"]
-        mask_extn = ".png"
-        self.img_fps = []
-        for extn in image_extns:
-            self.img_fps += glob.glob(self.img_dir + "/*" + extn)
-
-        if len(self.img_fps) == 0:
-            raise ValueError(f"No images found in {self.img_dir}")
-
-        self.img_fps.sort()
-
-        mask_uid_to_fp = {}
-        for mask_fp in glob.glob(self.gt_mask_dir + "/*" + mask_extn):
-            mask_uid_to_fp[self.extract_uuid(mask_fp)] = mask_fp
-
-        if len(mask_uid_to_fp) == 0:
-            raise ValueError(f"No masks found in {self.gt_mask_dir}")
-
-        self.mask_fps = [mask_uid_to_fp[self.extract_uuid(img_fp)] for img_fp in self.img_fps]
-
-        chosen_idx = self.np_random.integers(0, len(self.img_fps))
-        self._load_image_and_mask(self.img_fps[chosen_idx], self.mask_fps[chosen_idx])
-
-
-    def _load_image_and_mask(self, img_fp, gt_mask_fp):
-        self._image = cv2.resize(cv2.cvtColor(cv2.imread(img_fp, -1), cv2.COLOR_BGR2RGB), self.img_shape[:2][::-1])
+        self._image = cv2.resize(cv2.cvtColor(img, cv2.COLOR_BGR2RGB), self.img_shape[:2][::-1])
         self.sam_predictor.set_image(self._image)
         self._sam_image_embeddings = self.sam_predictor.get_image_embeddings()
         self._sam_pred_mask_prob = np.zeros(self.mask_shape, dtype=np.float32)
         self._sam_pred_mask = np.zeros(self.img_shape[:2], dtype=np.float32)
 
-        mask = cv2.resize(cv2.imread(gt_mask_fp, cv2.IMREAD_GRAYSCALE), 
-                          self.img_shape[:2][::-1], interpolation=cv2.INTER_NEAREST)
-        mask = ( mask/ 50).astype(np.uint8)
-        self._gt_mask = np.isin(mask, self.tgt_class_indices).astype(np.float32)
+        self._gt_mask = cv2.resize(mask, self.img_shape[:2][::-1], interpolation=cv2.INTER_NEAREST)
 
 
     def _get_obs(self):
@@ -181,9 +153,13 @@ class SamSegEnv(gym.Env):
 
 
     def convert_raw_input_to_action(self, input_point, input_label):
-        input_dist = np.array([np.linalg.norm([input_point[0]-point[0], input_point[1]-point[1]]) + \
-                               (1e6*(label != input_label)) for (point, label) in env._action_to_input.values() \
-                                if type(point) == tuple])
+        # input_dist = np.array([np.linalg.norm([input_point[0]-point[0], input_point[1]-point[1]]) + \
+        #                        (1e6*(label != input_label)) for (point, label) in env._action_to_input.values() \
+        #                         if type(point) == tuple])
+        point_dist = lambda x: np.linalg.norm([input_point[0]-x[0], input_point[1]-x[1]])
+        input_dist = np.array([point_dist(point) + (1e6 * (label != input_label)) 
+                               for (point, label) in self._action_to_input.values() 
+                               if type(point) == tuple])
         sample_action = np.argmin(input_dist)
         return sample_action
 
@@ -275,11 +251,7 @@ class SamSegEnv(gym.Env):
     def reset(self, seed=None, options=None):
         # We need the following line to seed self.np_random
         super().reset(seed=seed)
-
-        chosen_idx = self.np_random.integers(0, len(self.img_fps))
-        img_fp = self.img_fps[chosen_idx]
-        gt_mask_fp = self.mask_fps[chosen_idx]
-        self._load_image_and_mask(img_fp, gt_mask_fp)
+        self._load_sample_from_dataset()
 
         self._last_actions = {'input_points':[], 'input_labels':[]}
         self._num_steps = 0
@@ -307,32 +279,45 @@ class SamSegEnv(gym.Env):
 
         if self.render_mode == 'rgb_array':
             return cv2.cvtColor(concat_img, cv2.COLOR_BGR2RGB)
-
+ 
+        cv2.putText(concat_img,
+                    self._curr_target_cat,
+                    (10, concat_img.shape[0]//2),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (255, 255, 255),
+                    2)
         return concat_img
 
 
 if __name__ == "__main__":
-    img_shape = (640, 852, 3) # HxWxC
+    import os
+
+    img_shape = (375, 500, 3) # HxWxC
     embedding_shape = (256, 64, 64) # CxHxW
     mask_shape = (256, 256) # HxW
     render_frame_shape = (320, 426) # HxW
-    tgt_class_indices = [3]  
     max_steps = 5
-    img_patch_size = 64
+    img_patch_size = 32
     render_mode = 'human'
 
-    img_dir = '/media/shantanu/Data/sam_align_data/images/train'
-    gt_mask_dir = '/media/shantanu/Data/sam_align_data/annotations/train'
-    sam_ckpt_fp = '/home/shantanu/Projects/RepViT/sam/weights/repvit_sam.pt'
+    target_categories = ['person', 'cat', 'dog', 'car', 'bicycle', 'bus']
+    dataset_config = {
+        'type': 'coco',
+        'data_dir': os.path.join(os.getcwd(), 'data', 'coco-dataset'),
+        'data_type': 'val2017',
+        'seed': 42,
+    }
+
+    sam_ckpt_fp = os.path.join(os.getcwd(), 'weights', 'repvit_sam.pt')
 
     env = SamSegEnv(img_shape=img_shape, 
                     embedding_shape=embedding_shape,
                     mask_shape=mask_shape,
                     render_frame_shape=render_frame_shape,
-                    tgt_class_indices=tgt_class_indices,
                     max_steps=max_steps,
-                    img_dir=img_dir,
-                    gt_mask_dir=gt_mask_dir,
+                    target_categories=target_categories,
+                    dataset_config=dataset_config,
                     sam_ckpt_fp=sam_ckpt_fp,
                     img_patch_size=img_patch_size,
                     render_mode=render_mode)
@@ -345,9 +330,9 @@ if __name__ == "__main__":
 
     def get_action(event,x,y,flags,param):
         global sample_action
-        if event == cv2.EVENT_LBUTTONDBLCLK:
+        if event == cv2.EVENT_LBUTTONUP:
             tgt_label = 1
-        elif event == cv2.EVENT_RBUTTONDBLCLK:
+        elif event == cv2.EVENT_RBUTTONUP:
             tgt_label = 0
         else:
             return

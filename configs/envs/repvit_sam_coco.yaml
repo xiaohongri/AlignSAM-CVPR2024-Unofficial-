@@ -1,0 +1,17 @@
+img_shape: [375, 500, 3] # HxWxC
+embedding_shape: [256, 64, 64] # CxHxW
+mask_shape: [256, 256] # HxW
+render_frame_shape: [320, 426] # HxW
+max_steps: 5
+# img_patch_size: 16
+num_patches: 32  # along one axis 
+render_mode: 'rgb_array'
+
+target_categories : ['person', 'cat', 'dog', 'car', 'bicycle', 'bus']
+data_config:
+  type: 'coco'
+  data_dir: 'data/coco-dataset'
+  data_type: 'val2017'
+  seed: 42
+
+sam_ckpt_fp: 'weights/repvit_sam.pt'

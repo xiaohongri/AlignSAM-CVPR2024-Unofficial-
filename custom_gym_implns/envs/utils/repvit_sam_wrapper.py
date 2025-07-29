@@ -11,9 +11,17 @@ from repvit_sam.utils.transforms import ResizeLongestSide
 
 class RepVITSamWrapper:
     def __init__(self, ckpt_filepath, model_type="repvit", 
-                 device="cuda", multimaskoutput=False):
+                 device=None, multimaskoutput=False):
         if not os.path.exists(ckpt_filepath):
             raise Exception("SAM checkpoint path not valid")
+        
+        if device is None:
+            if torch.cuda.is_available():
+                device = torch.device("cuda")
+            elif torch.backends.mps.is_available():
+                device = torch.device("mps")
+            else:
+                device = torch.device("cpu")
         
         self.sam_model = sam_model_registry[model_type](checkpoint=ckpt_filepath)
         self.sam_model.to(device=device)
