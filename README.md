@@ -30,7 +30,7 @@ cd AlignSAM-CVPR2024-Unofficial-
     ```
 
 ## Usage
-- Create a data directory and download/symlink the ```CoCo Dataset` inside it.
+- Create a data directory and download/symlink the ```CoCo Dataset``` inside it.
 
 - Edit configuration files in ```configs/``` to update paths, categories etc.
 
